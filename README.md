@@ -7,10 +7,85 @@ Volcengine Ark Responses API.
 Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
 
+> [!NOTE]
+> **TikTok TechJam 2026 — Track 1 submission. Selected direction: identity
+> and authorization middleware.**
+> The Starter Kit's single shared bearer token has been replaced with real
+> human sessions, a distinct principal for every Agent, scoped and revocable
+> delegation grants, short-lived per-Run action tokens, an enforcing resource
+> server, a human approval gate, and an append-only authorization trail.
+> Read [`docs/IDENTITY_MIDDLEWARE.md`](docs/IDENTITY_MIDDLEWARE.md) for the
+> design, [`docs/architecture-identity.md`](docs/architecture-identity.md)
+> for the one-page diagram, and [`DEMO.md`](DEMO.md) for the demo script.
+
+## The middleware in one minute
+
+An Agent is not a feature of a user account. It is a separate actor that runs
+unattended, driven by a model that reads untrusted input and decides what to
+do next. So it gets its own identity, and its authority is checked where the
+work happens rather than where the work is requested.
+
+```
+alice  ──signs in──▶  control plane  ──token exchange──▶  action token
+                                                          sub: alice
+                                                          act: agent/3f2a1c4b
+                                                          scope: [docs:read]
+                                                          exp: +5 minutes
+                                                          bound to: this Run
+                                                                │
+                                          Agent Runtime ────────┘
+                                                │
+                                                ▼
+                                       resource server
+                                       ├─ doc-a1 (alice) ──▶ 200
+                                       └─ doc-b1 (bob)   ──▶ 404 cross_user_denied
+```
+
+- **Two principals.** A human signs in with a password. An Agent gets its own
+  principal at creation, with its own generation and its own kill switch. Audit
+  records name both: *Alice, through agent/3f2a1c4b, tried to read doc-b1.*
+- **Delegation, not impersonation.** A grant is scoped, time-bound and
+  revocable. It can only carry data-plane scopes, only scopes the delegator
+  holds, and it reaches only the delegator's own resources.
+- **Short-lived credentials.** Each Run mints an HMAC-signed action token
+  following RFC 8693 `sub`/`act` delegation semantics. Five minutes, one Run,
+  never persisted, never in argv, never seen by the browser.
+- **Enforcement at the point of use.** A thirteen-step policy chain runs against
+  live state on every resource call. A valid signature is necessary and never
+  sufficient.
+- **Instant revocation.** Revoke a grant, rotate the principal, stop the Agent,
+  end the Run or disable the human, and the outstanding token is inert on its
+  very next call.
+- **Audience separation.** `/api/*` accepts human sessions only;
+  `/api/resources/*` accepts action tokens only. Neither plane holds a
+  credential it could forward to the other, so token passthrough — the confused
+  deputy problem — cannot be expressed.
+- **Human approval for high-risk actions,** bound to a hash of the exact
+  parameters, single use, and answerable only by the owner.
+
+### Try it in fifteen seconds
+
+```bash
+npm install
+npm run smoke:identity   # end-to-end over real HTTP; no Docker, no Ark key
+npm run check            # typecheck + 52 tests + production build
+```
+
+### Demo accounts
+
+| User | Password (override with `LAUNCHPAD_SEED_PASSWORD_*`) | Owns |
+| --- | --- | --- |
+| `alice` | `alice-demo-password` | `doc-a1`, `doc-a2` |
+| `bob` | `bob-demo-password` | `doc-b1`, `doc-b2` |
+| `admin` | `admin-demo-password` | nothing; may read the platform audit log |
+
 > [!WARNING]
-> This is a single-user proof of concept. It intentionally has no identity,
-> tracing, audit, or hardened sandbox middleware. Do not use production data or
-> credentials. See [SECURITY.md](SECURITY.md).
+> This is still a hackathon proof of concept. The identity provider is a seeded
+> password store, the JSON store is single-process, ordinary containers are not
+> a hardened multi-tenant boundary, and the Ark key is still passed into the
+> Runtime. Known limitations are listed in full in
+> [`docs/IDENTITY_MIDDLEWARE.md`](docs/IDENTITY_MIDDLEWARE.md#residual-risks-stated-honestly).
+> Do not use production data or credentials. See [SECURITY.md](SECURITY.md).
 
 ## Screenshots
 
@@ -30,6 +105,17 @@ Volcengine ECS.
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
 - Docker and Terraform deployment paths for Volcengine ECS
+
+### Identity and authorization middleware (added for TechJam)
+
+- Password sign-in with server-side sessions; only `sha256(secret)` is stored
+- A distinct, rotatable, revocable principal for every Agent
+- Scoped, time-bound delegation grants with subset and non-delegatable-scope checks
+- Per-Run HMAC action tokens with RFC 8693 `sub`/`act` claims and RFC 8707-style audience binding
+- A mock protected resource server that enforces ownership and scope in the backend
+- Human approval gate for high-risk scopes, bound to the exact parameters
+- Append-only, redacted authorization trail with full actor attribution
+- Ownership-scoped UI: agent list, grants panel, approval inbox, audit timeline
 
 ## Requirements
 

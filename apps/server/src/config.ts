@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -45,6 +46,27 @@ const envSchema = z.object({
     .url()
     .default("https://ark.cn-beijing.volces.com/api/v3"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+
+  /* ---- Identity & authorization middleware ---------------------- */
+  /** Signing key for Action Tokens. Random per boot unless pinned. */
+  LAUNCHPAD_TOKEN_SECRET: z.string().min(16).optional(),
+  /** Human session lifetime. */
+  LAUNCHPAD_SESSION_TTL_MINUTES: z.coerce.number().int().min(1).max(1440).default(720),
+  /** Action Token lifetime. Deliberately minutes, not hours. */
+  LAUNCHPAD_ACTION_TOKEN_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
+  LAUNCHPAD_GRANT_TTL_MINUTES: z.coerce.number().int().min(1).max(10080).default(60),
+  LAUNCHPAD_GRANT_MAX_TTL_MINUTES: z.coerce.number().int().min(1).max(10080).default(1440),
+  LAUNCHPAD_APPROVAL_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).default(600),
+  /** Seed passwords for the demo users. Never used in production. */
+  LAUNCHPAD_SEED_PASSWORD_ALICE: z.string().min(6).default("alice-demo-password"),
+  LAUNCHPAD_SEED_PASSWORD_BOB: z.string().min(6).default("bob-demo-password"),
+  LAUNCHPAD_SEED_PASSWORD_ADMIN: z.string().min(6).default("admin-demo-password"),
+  /**
+   * Host the Agent Runtime uses to reach the resource API. Containers
+   * cannot use 127.0.0.1, so the default is the Docker/Podman gateway
+   * alias that this project also adds with --add-host.
+   */
+  LAUNCHPAD_RUNTIME_API_HOST: z.string().min(1).default("host.docker.internal"),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -88,6 +110,20 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     arkModel: env.ARK_MODEL?.trim() ?? "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),
     nodeEnv: env.NODE_ENV,
+    /* Identity & authorization middleware */
+    tokenSecret: env.LAUNCHPAD_TOKEN_SECRET ?? randomBytes(32).toString("base64url"),
+    tokenSecretPinned: env.LAUNCHPAD_TOKEN_SECRET !== undefined,
+    sessionTtlMs: env.LAUNCHPAD_SESSION_TTL_MINUTES * 60_000,
+    actionTokenTtlSeconds: env.LAUNCHPAD_ACTION_TOKEN_TTL_SECONDS,
+    grantDefaultTtlMinutes: env.LAUNCHPAD_GRANT_TTL_MINUTES,
+    grantMaxTtlMinutes: env.LAUNCHPAD_GRANT_MAX_TTL_MINUTES,
+    approvalTtlSeconds: env.LAUNCHPAD_APPROVAL_TTL_SECONDS,
+    seedPasswords: {
+      alice: env.LAUNCHPAD_SEED_PASSWORD_ALICE,
+      bob: env.LAUNCHPAD_SEED_PASSWORD_BOB,
+      admin: env.LAUNCHPAD_SEED_PASSWORD_ADMIN,
+    },
+    runtimeApiHost: env.LAUNCHPAD_RUNTIME_API_HOST,
   };
 }
 
@@ -113,6 +149,13 @@ export async function writeCodexConfig(config: AppConfig): Promise<void> {
     'env_key = "ARK_API_KEY"',
     'wire_api = "responses"',
     "requires_openai_auth = false",
+    "",
+    "# The Agent Runtime needs network egress to reach the identity-enforced",
+    "# resource API. Egress is safe to enable only because every call now",
+    "# carries a scoped, short-lived, revocable Action Token that the resource",
+    "# server verifies against live delegation state on every request.",
+    "[sandbox_workspace_write]",
+    "network_access = true",
     "",
   ].join("\n");
   await writeFile(path.join(config.codexHome, "config.toml"), toml, {

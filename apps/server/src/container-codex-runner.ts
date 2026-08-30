@@ -41,6 +41,12 @@ export function buildContainerRunArgs(
 ): string[] {
   const name = containerName(request.agentId, config.runtimeInstanceId);
   const engineName = config.containerEngine.split(/[\\/]/).at(-1)?.toLowerCase();
+  // Only the NAMES of the request-scoped credentials go on the command
+  // line. The engine reads their values from its own environment, so the
+  // Action Token never lands in argv, `docker inspect`, or shell history.
+  const credentialNames = Object.keys(request.credentials ?? {}).filter((key) =>
+    /^LAUNCHPAD_[A-Z0-9_]+$/.test(key),
+  );
   return [
     "run",
     "--rm",
@@ -76,6 +82,11 @@ export function buildContainerRunArgs(
     "HOME=/tmp",
     "--env",
     "NO_COLOR=1",
+    ...credentialNames.flatMap((key) => ["--env", key]),
+    // Lets the Runtime container reach the resource API on the host under
+    // one stable name on both Docker Desktop and Linux/Podman.
+    "--add-host",
+    config.runtimeApiHost + ":host-gateway",
     "--mount",
     "type=bind,src=" + request.workspacePath + ",dst=/workspace",
     "--mount",
@@ -147,7 +158,7 @@ export class ContainerCodexRunner implements AgentRunner {
       buildContainerRunArgs(request, this.config),
       {
         cwd: request.workspacePath,
-        env: this.childEnvironment(),
+        env: this.childEnvironment(request.credentials),
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -235,11 +246,16 @@ export class ContainerCodexRunner implements AgentRunner {
     }
   }
 
-  private childEnvironment(): NodeJS.ProcessEnv {
+  private childEnvironment(
+    credentials: Record<string, string> = {},
+  ): NodeJS.ProcessEnv {
     const environment: NodeJS.ProcessEnv = {
       ARK_API_KEY: this.config.arkApiKey,
       NO_COLOR: "1",
     };
+    for (const [name, value] of Object.entries(credentials)) {
+      environment[name] = value;
+    }
     for (const name of [
       "PATH",
       "HOME",
