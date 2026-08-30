@@ -439,6 +439,23 @@ export default function App() {
           </div>
         )}
 
+        {system?.identity?.runtimeMayNotReachHost && (
+          <div className="config-banner">
+            <span>!</span>
+            <div>
+              <strong>The Agent Runtime may not be able to reach the resource API</strong>
+              <p>
+                Runs execute in containers, but the platform is bound to loopback. Docker
+                Desktop usually bridges this; Colima, Podman and Linux do not. If a
+                delegated call fails to connect, restart with <code>HOST=0.0.0.0</code> —
+                the control plane now requires a real session — or use{" "}
+                <code>RUNTIME_PROVIDER=local-process</code>. The Runtime is being told to
+                call <code>{system.identity.resourceApiForRuntime}</code>.
+              </p>
+            </div>
+          </div>
+        )}
+
         <ApprovalInbox onError={reportError} />
 
         {selected ? (

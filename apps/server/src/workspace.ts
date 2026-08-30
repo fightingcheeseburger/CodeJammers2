@@ -1,4 +1,4 @@
-import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Agent } from "./types.js";
 
@@ -11,45 +11,87 @@ import type { Agent } from "./types.js";
  * to "print your configuration" cannot leak it into the transcript.
  */
 const RESOURCE_HELPER = [
-  "#!/bin/sh",
-  "# Platform-managed helper. Calls the identity-enforced resource API",
-  "# using the request-scoped Action Token for the current turn.",
-  "set -eu",
+  "// Platform-managed helper. Calls the identity-enforced resource API",
+  "// using the request-scoped Action Token for the current turn.",
+  "//",
+  "// Written in Node rather than curl+shell on purpose: Node is present in",
+  "// both the Runtime container image and the local-process profile, curl is",
+  "// not, and building JSON with shell quoting is a bug factory.",
+  "//",
+  "// The token is read from the environment and never printed, never written",
+  "// to disk, and never placed on a command line.",
   "",
-  'if [ -z "${LAUNCHPAD_ACTION_TOKEN:-}" ]; then',
-  '  echo "No action token: this Run carries no delegated authority." >&2',
-  "  exit 3",
-  "fi",
-  'API="${LAUNCHPAD_RESOURCE_API:?resource API not configured}"',
+  "const [, , command, target, ...rest] = process.argv;",
+  "const token = process.env.LAUNCHPAD_ACTION_TOKEN;",
+  "const api = process.env.LAUNCHPAD_RESOURCE_API;",
   "",
-  'case "${1:-}" in',
-  "  list)",
-  '    curl -sS -o /dev/stderr -w "%{http_code}\\n" \\',
-  '      -H "Authorization: Bearer $LAUNCHPAD_ACTION_TOKEN" \\',
-  '      "$API/documents"',
-  "    ;;",
-  "  get)",
-  '    curl -sS -o /dev/stderr -w "%{http_code}\\n" \\',
-  '      -H "Authorization: Bearer $LAUNCHPAD_ACTION_TOKEN" \\',
-  '      "$API/documents/${2:?document id required}"',
-  "    ;;",
-  "  put)",
-  '    curl -sS -o /dev/stderr -w "%{http_code}\\n" -X PUT \\',
-  '      -H "Authorization: Bearer $LAUNCHPAD_ACTION_TOKEN" \\',
-  '      -H "Content-Type: application/json" \\',
-  '      --data "$(printf \'{"body":%s}\' "$(printf \'%s\' "${3:?body required}" | sed \'s/\\\\/\\\\\\\\/g; s/"/\\\\"/g; s/^/"/; s/$/"/\')")" \\',
-  '      "$API/documents/${2:?document id required}"',
-  "    ;;",
-  "  approval)",
-  '    curl -sS -o /dev/stderr -w "%{http_code}\\n" \\',
-  '      -H "Authorization: Bearer $LAUNCHPAD_ACTION_TOKEN" \\',
-  '      "$API/approvals/${2:?approval id required}"',
-  "    ;;",
-  "  *)",
-  '    echo "usage: resource {list|get <id>|put <id> <body>|approval <id>}" >&2',
-  "    exit 2",
-  "    ;;",
-  "esac",
+  "if (!api) {",
+  '  console.error("LAUNCHPAD_RESOURCE_API is not set. This turn has no resource API.");',
+  "  process.exit(3);",
+  "}",
+  "if (!token) {",
+  '  console.error("No action token: this Run carries no delegated authority.");',
+  "  process.exit(3);",
+  "}",
+  "",
+  "const usage = () => {",
+  "  console.error(",
+  '    "usage: node .launchpad/resource.mjs {list | get <id> | put <id> <body> | approval <id>}",',
+  "  );",
+  "  process.exit(2);",
+  "};",
+  "",
+  "let url = api;",
+  'let init = { method: "GET", headers: { authorization: "Bearer " + token } };',
+  "",
+  "switch (command) {",
+  '  case "list":',
+  '    url = api + "/documents";',
+  "    break;",
+  '  case "get":',
+  "    if (!target) usage();",
+  '    url = api + "/documents/" + encodeURIComponent(target);',
+  "    break;",
+  '  case "approval":',
+  "    if (!target) usage();",
+  '    url = api + "/approvals/" + encodeURIComponent(target);',
+  "    break;",
+  '  case "put": {',
+  "    if (!target || rest.length === 0) usage();",
+  '    url = api + "/documents/" + encodeURIComponent(target);',
+  "    init = {",
+  '      method: "PUT",',
+  "      headers: {",
+  '        authorization: "Bearer " + token,',
+  '        "content-type": "application/json",',
+  "      },",
+  '      body: JSON.stringify({ body: rest.join(" ") }),',
+  "    };",
+  "    break;",
+  "  }",
+  "  default:",
+  "    usage();",
+  "}",
+  "",
+  "try {",
+  "  const response = await fetch(url, init);",
+  "  const text = await response.text();",
+  "  // Status on stdout, body on stderr, so a status check is a clean read.",
+  "  console.log(String(response.status));",
+  "  console.error(text);",
+  "  process.exit(0);",
+  "} catch (error) {",
+  "  console.error(",
+  '    "Could not reach the resource API at " +',
+  "      api +",
+  '      ".\\n" +',
+  '      "If this Run is in a container, the platform host is probably bound to\\n" +',
+  '      "loopback only. Restart the platform with HOST=0.0.0.0, or use\\n" +',
+  '      "RUNTIME_PROVIDER=local-process. Underlying error: " +',
+  "      (error instanceof Error ? error.message : String(error)),",
+  "  );",
+  "  process.exit(4);",
+  "}",
   "",
 ].join("\n");
 
@@ -68,7 +110,6 @@ export class WorkspaceManager {
   async create(agent: Agent): Promise<void> {
     await mkdir(agent.workspacePath, { recursive: false });
     await this.writeInstructions(agent);
-    await this.writeResourceHelper(agent);
     await writeFile(
       path.join(agent.workspacePath, ".gitignore"),
       [".codex/", "node_modules/", "dist/", ".env", "*.log", ""].join("\n"),
@@ -87,12 +128,17 @@ export class WorkspaceManager {
     );
   }
 
+  /**
+   * Regenerated whenever the Agent is created or updated, so an Agent made
+   * before this middleware existed picks the helper up on its next edit.
+   */
   private async writeResourceHelper(agent: Agent): Promise<void> {
     const directory = path.join(agent.workspacePath, ".launchpad");
     await mkdir(directory, { recursive: true });
-    const file = path.join(directory, "resource");
-    await writeFile(file, RESOURCE_HELPER, { encoding: "utf8", mode: 0o755 });
-    await chmod(file, 0o755);
+    await writeFile(path.join(directory, "resource.mjs"), RESOURCE_HELPER, {
+      encoding: "utf8",
+      mode: 0o644,
+    });
   }
 
   async writeInstructions(agent: Agent): Promise<void> {
@@ -125,10 +171,10 @@ export class WorkspaceManager {
       "To reach protected resources, run the platform helper:",
       "",
       "```sh",
-      "./.launchpad/resource list                 # documents you may reach",
-      "./.launchpad/resource get <document-id>    # read one document",
-      './.launchpad/resource put <document-id> "<new body>"   # write (needs approval)',
-      "./.launchpad/resource approval <approval-id>           # poll a decision",
+      "node .launchpad/resource.mjs list               # documents you may reach",
+      "node .launchpad/resource.mjs get <document-id>  # read one document",
+      'node .launchpad/resource.mjs put <document-id> "<new body>"  # write (needs approval)',
+      "node .launchpad/resource.mjs approval <approval-id>          # poll a decision",
       "```",
       "",
       "The helper prints the HTTP status on stdout and the response body on",
@@ -152,6 +198,7 @@ export class WorkspaceManager {
       .filter((line, index, lines) => !(line === "" && lines[index - 1] === ""))
       .join("\n");
     await writeFile(path.join(agent.workspacePath, "AGENTS.md"), content, "utf8");
+    await this.writeResourceHelper(agent);
   }
 
   async archive(agent: Agent): Promise<string> {

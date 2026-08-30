@@ -250,6 +250,12 @@ the backend, which is the entire point.
 - **Ordinary containers are not a hardened multi-tenant boundary.** We
   narrowed *authority*, not the sandbox. Two Agents owned by different
   users still share a kernel.
+- **The container Runtime needs host networking to reach the resource API.**
+  The platform must listen on a non-loopback address for the container
+  profile on Colima, Podman and Linux. That is safe now that the control
+  plane authenticates, and the platform refuses to do it while the demo
+  accounts hold default passwords — but it is a real deployment
+  constraint, not a detail. The `local-process` profile avoids it entirely.
 - **Codex network egress is now enabled** (`network_access = true` in the
   generated `config.toml`) so the Agent can reach the resource API. Egress
   is not allowlisted to that host; a determined Agent can still make

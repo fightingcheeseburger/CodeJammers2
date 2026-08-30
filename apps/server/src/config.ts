@@ -67,6 +67,11 @@ const envSchema = z.object({
    * alias that this project also adds with --add-host.
    */
   LAUNCHPAD_RUNTIME_API_HOST: z.string().min(1).default("host.docker.internal"),
+  /** Local-demo escape hatch for the default-password bind guard. */
+  LAUNCHPAD_ALLOW_DEFAULT_PASSWORDS: z
+    .string()
+    .transform((value) => value === "true" || value === "1")
+    .optional(),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -75,12 +80,33 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const env = envSchema.parse(environment);
   const authToken = env.APP_AUTH_TOKEN?.trim() ?? "";
   const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
-  if (env.NODE_ENV === "production" && !loopbackHosts.has(env.HOST)) {
-    if (authToken.length < 24 || authToken.startsWith("replace-")) {
-      throw new Error(
-        "APP_AUTH_TOKEN must contain at least 24 characters for a non-loopback production server",
-      );
-    }
+
+  /**
+   * The Starter Kit refused a non-loopback bind unless APP_AUTH_TOKEN was
+   * long enough. That token no longer authenticates anything, so the check
+   * was guarding a door that had been removed. It is replaced with the
+   * live equivalent: do not expose the platform beyond loopback while the
+   * seeded demo accounts still have their published passwords.
+   */
+  const usingDefaultPasswords =
+    env.LAUNCHPAD_SEED_PASSWORD_ALICE === "alice-demo-password" ||
+    env.LAUNCHPAD_SEED_PASSWORD_BOB === "bob-demo-password" ||
+    env.LAUNCHPAD_SEED_PASSWORD_ADMIN === "admin-demo-password";
+
+  if (
+    env.NODE_ENV === "production" &&
+    !loopbackHosts.has(env.HOST) &&
+    usingDefaultPasswords &&
+    !env.LAUNCHPAD_ALLOW_DEFAULT_PASSWORDS
+  ) {
+    throw new Error(
+      "Refusing to listen on " +
+        env.HOST +
+        " while the demo accounts still use their default passwords. Set " +
+        "LAUNCHPAD_SEED_PASSWORD_ALICE, _BOB and _ADMIN, or set " +
+        "LAUNCHPAD_ALLOW_DEFAULT_PASSWORDS=true if this is a local demo on a " +
+        "trusted network.",
+    );
   }
   const defaultContainerUser =
     typeof process.getuid === "function" && typeof process.getgid === "function"
@@ -124,6 +150,17 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
       admin: env.LAUNCHPAD_SEED_PASSWORD_ADMIN,
     },
     runtimeApiHost: env.LAUNCHPAD_RUNTIME_API_HOST,
+    /**
+     * True when Runs happen in a container but the platform listens on
+     * loopback only. On Docker Desktop the host proxy usually bridges this
+     * anyway; on Colima, Podman and Linux it does not, and the Agent's
+     * calls to the resource API fail with ECONNREFUSED. Surfaced at
+     * startup and in /api/system rather than left to be discovered on
+     * stage.
+     */
+    runtimeMayNotReachHost:
+      env.RUNTIME_PROVIDER === "container" && loopbackHosts.has(env.HOST),
+    usingDefaultPasswords,
   };
 }
 

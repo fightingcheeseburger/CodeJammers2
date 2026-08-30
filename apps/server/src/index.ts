@@ -36,6 +36,17 @@ if (!config.tokenSecretPinned) {
   );
 }
 
+if (config.runtimeMayNotReachHost) {
+  app.log.warn(
+    "Runs execute in containers but the platform is bound to " +
+      config.host +
+      ". On Colima, Podman and Linux the Agent Runtime cannot reach the " +
+      "resource API at that address. Restart with HOST=0.0.0.0 (the control " +
+      "plane now requires a real session, so this is no longer an open door) " +
+      "or set RUNTIME_PROVIDER=local-process.",
+  );
+}
+
 // Approvals do not expire on their own in a JSON store; sweep them.
 const approvalSweep = setInterval(() => {
   void identity.expireStaleApprovals().catch(() => undefined);

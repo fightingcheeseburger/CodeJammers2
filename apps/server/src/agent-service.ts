@@ -373,6 +373,9 @@ export class AgentService {
         grantDefaultTtlMinutes: this.config.grantDefaultTtlMinutes,
         approvalTtlSeconds: this.config.approvalTtlSeconds,
         tokenSecretPinned: this.config.tokenSecretPinned,
+        resourceApiForRuntime: this.resourceApiUrl(),
+        runtimeMayNotReachHost: this.config.runtimeMayNotReachHost,
+        usingDefaultPasswords: this.config.usingDefaultPasswords,
       },
     };
   }

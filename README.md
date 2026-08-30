@@ -63,6 +63,33 @@ alice  ──signs in──▶  control plane  ──token exchange──▶  ac
 - **Human approval for high-risk actions,** bound to a hash of the exact
   parameters, single use, and answerable only by the owner.
 
+### Running the container demo (macOS and Linux)
+
+```bash
+ARK_API_KEY=... ARK_MODEL=ep-... HOST=0.0.0.0 LAUNCHPAD_ALLOW_DEFAULT_PASSWORDS=true npm run poc
+```
+
+The Agent Runtime runs in a container and calls the resource API back on the
+host, so the platform has to listen somewhere the container can reach. Docker
+Desktop for Mac usually bridges a loopback bind; Colima, Podman and Linux do
+not. Three ways to handle it:
+
+| Situation | What to do |
+| --- | --- |
+| Container profile, any engine | `HOST=0.0.0.0` as above. Safe now that the control plane requires a session. |
+| You have `codex` installed on the host | `RUNTIME_PROVIDER=local-process npm run poc` - no container, no host networking |
+| No engine, no key, just want the evidence | `npm run smoke:identity` |
+
+The platform refuses to bind beyond loopback while the demo accounts still
+hold their published passwords. Set `LAUNCHPAD_SEED_PASSWORD_ALICE`, `_BOB`
+and `_ADMIN`, or pass `LAUNCHPAD_ALLOW_DEFAULT_PASSWORDS=true` for a local
+demo. (This guard replaces the Starter Kit's `APP_AUTH_TOKEN` length check,
+which guarded a door this middleware removed.)
+
+If the platform is bound to loopback while Runs are containerised, the UI
+shows a banner and the server logs a warning at startup - the failure mode is
+visible, not silent.
+
 ### Try it in fifteen seconds
 
 ```bash

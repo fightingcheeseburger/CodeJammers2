@@ -140,6 +140,9 @@ export interface SystemInfo {
     grantDefaultTtlMinutes: number;
     approvalTtlSeconds: number;
     tokenSecretPinned: boolean;
+    resourceApiForRuntime: string;
+    runtimeMayNotReachHost: boolean;
+    usingDefaultPasswords: boolean;
   };
 }
 

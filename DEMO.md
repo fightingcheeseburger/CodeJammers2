@@ -7,8 +7,24 @@ to be and no wider.
 ## Before you start (not on the clock)
 
 ```bash
-ARK_API_KEY=... ARK_MODEL=ep-... npm run poc
+ARK_API_KEY=... ARK_MODEL=ep-... HOST=0.0.0.0 LAUNCHPAD_ALLOW_DEFAULT_PASSWORDS=true npm run poc
 ```
+
+`HOST=0.0.0.0` matters. Runs happen inside a container, and the Agent has to
+reach the resource API back on the host. Docker Desktop for Mac usually
+bridges a loopback-bound server for you; Colima, Podman and Linux do not, and
+the Agent's delegated calls fail with a connection error instead of a
+denial - which is a confusing thing to debug on stage.
+
+Binding beyond loopback is safe here in a way it was not before: the control
+plane now requires a real session. The platform still refuses to do it while
+the demo accounts hold their published passwords, which is why the opt-out
+flag is there. For anything less private than your own laptop, set
+`LAUNCHPAD_SEED_PASSWORD_ALICE`, `_BOB` and `_ADMIN` instead of using the flag.
+
+If you leave `HOST` alone, the UI shows an amber banner telling you exactly
+this, and the workspace helper prints the same advice if a call cannot
+connect. Neither is a silent failure.
 
 Open two browser windows side by side:
 
