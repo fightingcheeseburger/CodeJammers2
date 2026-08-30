@@ -394,19 +394,31 @@ export class IdentityService {
     const principal = this.getPrincipalForAgent(agentId);
     if (!principal || principal.revokedAt) return null;
     const timestamp = Date.now();
-    return (
-      this.store
-        .snapshot()
-        .grants.filter(
-          (grant) =>
-            grant.agentPrincipalId === principal.id &&
-            grant.subjectUserId === subjectUserId &&
-            grant.principalGeneration === principal.generation &&
-            !grant.revokedAt &&
-            new Date(grant.expiresAt).getTime() > timestamp,
-        )
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null
-    );
+    const matches = this.store
+      .snapshot()
+      .grants.filter(
+        (grant) =>
+          grant.agentPrincipalId === principal.id &&
+          grant.subjectUserId === subjectUserId &&
+          grant.principalGeneration === principal.generation &&
+          !grant.revokedAt &&
+          new Date(grant.expiresAt).getTime() > timestamp,
+      );
+    /**
+     * The store only ever appends grants (see JsonStore.mutate and
+     * createGrant), so array order IS chronological order. Picking the
+     * last match is therefore always the most recently issued grant.
+     *
+     * This deliberately does NOT sort by `createdAt`. Two grants can be
+     * issued within the same millisecond - e.g. the default read-only
+     * grant createAgent issues, followed immediately by a wider grant the
+     * owner requests - and Array.sort is stable, so a comparator that
+     * treats equal timestamps as a tie leaves the OLDER, narrower grant in
+     * position [0]. On fast hardware that collision is common, not
+     * theoretical: it is exactly what made a freshly issued docs:write
+     * grant lose to the original docs:read grant here.
+     */
+    return matches.at(-1) ?? null;
   }
 
   /* ---------------------------------------------------------------- *
@@ -506,6 +518,10 @@ export class IdentityService {
     resourceId: string;
     paramsHash: string;
   }): ApprovalRequest | null {
+    // Same reasoning as activeGrantForAgent: the store only appends, so
+    // array order is already chronological. Walking from the end finds
+    // the most recent match without comparing millisecond-resolution
+    // timestamps, which can tie.
     const candidates = this.store
       .snapshot()
       .approvals.filter(
@@ -514,15 +530,18 @@ export class IdentityService {
           item.action === input.action &&
           item.resourceId === input.resourceId &&
           item.paramsHash === input.paramsHash,
-      )
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      );
     /**
      * A consumed approval is not an approval any more. Ignoring it here
      * means an identical repeat of an approved action asks the human
      * again rather than riding on the earlier decision: approval is
      * per-action, not per-shape.
      */
-    return candidates.find((item) => !item.consumedAt) ?? null;
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const candidate = candidates[index];
+      if (candidate && !candidate.consumedAt) return candidate;
+    }
+    return null;
   }
 
   async requestApproval(input: {
