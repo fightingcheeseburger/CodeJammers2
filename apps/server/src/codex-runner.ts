@@ -132,7 +132,7 @@ export class CodexRunner implements AgentRunner {
     const args = buildCodexArgs(request, this.config.codexSandboxMode);
     const child = spawn(this.config.codexBin, args, {
       cwd: request.workspacePath,
-      env: this.childEnvironment(),
+      env: this.childEnvironment(request.credentials),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const settled = new Promise<void>((resolve) => {
@@ -239,7 +239,14 @@ export class CodexRunner implements AgentRunner {
     }
   }
 
-  private childEnvironment(): NodeJS.ProcessEnv {
+  /**
+   * Request-scoped credentials are passed through the child process
+   * environment, never on the command line, so the Action Token never
+   * appears in `ps` output or in any process listing.
+   */
+  private childEnvironment(
+    credentials: Record<string, string> = {},
+  ): NodeJS.ProcessEnv {
     const inheritedNames = [
       "PATH",
       "HOME",
@@ -261,6 +268,9 @@ export class CodexRunner implements AgentRunner {
     };
     for (const name of inheritedNames) {
       if (process.env[name] !== undefined) environment[name] = process.env[name];
+    }
+    for (const [name, value] of Object.entries(credentials)) {
+      environment[name] = value;
     }
     return environment;
   }

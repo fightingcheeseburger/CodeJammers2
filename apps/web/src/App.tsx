@@ -1,11 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, setAuthToken } from "./api";
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import { api, ApiError, restoreSessionToken, setSessionToken } from "./api";
+import { ApprovalInbox } from "./components/ApprovalInbox";
+import { AuditPanel } from "./components/AuditPanel";
+import { IdentityPanel } from "./components/IdentityPanel";
+import { LoginScreen } from "./components/LoginScreen";
+import type {
+  Agent,
+  AgentRun,
+  DelegationSummary,
+  Message,
+  ProtectedDocument,
+  SessionUser,
+  SystemInfo,
+} from "./types";
 
 const starterPrompts = [
-  "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
-  "Inspect this workspace and explain what you would improve first.",
-  "Build a responsive single-page todo app with tests.",
+  "List the documents you can reach and summarise them.",
+  "Read doc-b1 and tell me what it says.",
+  "Rewrite doc-a1 with a two-line summary at the top.",
 ];
 
 const emptyForm = {
@@ -15,11 +27,12 @@ const emptyForm = {
     "Help me build and test software in this workspace. Keep changes small and explain the result.",
 };
 
+type Tab = "playground" | "identity" | "audit";
+
 function formatTime(value: string): string {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(
+    new Date(value),
+  );
 }
 
 function StatusPill({ status }: { status: Agent["status"] }) {
@@ -36,24 +49,29 @@ function Spinner() {
 }
 
 export default function App() {
+  const [session, setSession] = useState<SessionUser | null>(null);
+  const [booting, setBooting] = useState(true);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [system, setSystem] = useState<SystemInfo | null>(null);
+  const [documents, setDocuments] = useState<ProtectedDocument[]>([]);
+  const [tab, setTab] = useState<Tab>("playground");
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [prompt, setPrompt] = useState("");
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+  const [delegation, setDelegation] = useState<DelegationSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [authRequired, setAuthRequired] = useState<boolean | null>(null);
-  const [authInput, setAuthInput] = useState("");
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const pollingRunIds = useRef(new Set<string>());
   selectedIdRef.current = selectedId;
+
+  const reportError = useCallback((message: string) => setError(message), []);
 
   const selected = useMemo(
     () => agents.find((agent) => agent.id === selectedId) ?? null,
@@ -64,33 +82,43 @@ export default function App() {
     const { agents: next } = await api.listAgents();
     setAgents(next);
     setSelectedId((current) =>
-      current && next.some((agent) => agent.id === current)
-        ? current
-        : (next[0]?.id ?? null),
+      current && next.some((agent) => agent.id === current) ? current : (next[0]?.id ?? null),
     );
   }, []);
 
   const refreshMessages = useCallback(async (agentId: string) => {
     const result = await api.messages(agentId);
-    if (mountedRef.current && selectedIdRef.current === agentId) {
-      setMessages(result.messages);
-    }
+    if (mountedRef.current && selectedIdRef.current === agentId) setMessages(result.messages);
   }, []);
 
   const bootstrap = useCallback(async () => {
-    await Promise.all([refreshAgents(), api.system().then(setSystem)]);
+    const [, systemInfo, mine] = await Promise.all([
+      refreshAgents(),
+      api.system(),
+      api.myDocuments(),
+    ]);
+    setSystem(systemInfo);
+    setDocuments(mine.documents);
   }, [refreshAgents]);
 
   useEffect(() => {
     mountedRef.current = true;
+    const stored = restoreSessionToken();
+    if (!stored) {
+      setBooting(false);
+      return () => {
+        mountedRef.current = false;
+      };
+    }
     void api
-      .auth()
-      .then(async ({ required }) => {
+      .me()
+      .then(async ({ user }) => {
         if (!mountedRef.current) return;
-        setAuthRequired(required);
-        if (!required) await bootstrap();
+        setSession(user);
+        await bootstrap();
       })
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+      .catch(() => setSessionToken(""))
+      .finally(() => mountedRef.current && setBooting(false));
     return () => {
       mountedRef.current = false;
     };
@@ -98,7 +126,9 @@ export default function App() {
 
   useEffect(() => {
     setActiveRun(null);
+    setDelegation(null);
     setShowSettings(false);
+    setTab("playground");
     if (!selectedId) {
       setMessages([]);
       return;
@@ -114,9 +144,7 @@ export default function App() {
           );
         }
       })
-      .catch((reason) =>
-        setError(reason instanceof Error ? reason.message : String(reason)),
-      );
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
   }, [refreshMessages, selectedId]);
 
   useEffect(() => {
@@ -132,6 +160,40 @@ export default function App() {
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, activeRun]);
+
+  const signIn = async (username: string, password: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.login(username, password);
+      setSessionToken(result.token);
+      const me = await api.me();
+      setSession(me.user);
+      await bootstrap();
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 401) {
+        setError("Invalid username or password.");
+      } else {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const signOut = async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* the session is being discarded regardless */
+    }
+    setSessionToken("");
+    setSession(null);
+    setAgents([]);
+    setSelectedId(null);
+    setMessages([]);
+    setDocuments([]);
+  };
 
   const createAgent = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -171,11 +233,8 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      if (selected.status === "stopped") {
-        await api.startAgent(selected.id);
-      } else {
-        await api.stopAgent(selected.id);
-      }
+      if (selected.status === "stopped") await api.startAgent(selected.id);
+      else await api.stopAgent(selected.id);
       await refreshAgents();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -186,7 +245,7 @@ export default function App() {
 
   const deleteAgent = async () => {
     if (!selected) return;
-    if (!window.confirm("Delete " + selected.name + "? Its workspace will be archived.")) {
+    if (!window.confirm("Delete " + selected.name + "? Its workspace will be archived and its identity revoked.")) {
       return;
     }
     setBusy(true);
@@ -211,7 +270,11 @@ export default function App() {
         const result = await api.run(runId);
         if (selectedIdRef.current === agentId) setActiveRun(result.run);
         if (!["queued", "running"].includes(result.run.status)) {
-          await Promise.all([refreshMessages(agentId), refreshAgents()]);
+          await Promise.all([
+            refreshMessages(agentId),
+            refreshAgents(),
+            api.myDocuments().then((result) => setDocuments(result.documents)),
+          ]);
           return;
         }
       }
@@ -231,11 +294,10 @@ export default function App() {
       if (selectedIdRef.current === selected.id) {
         setMessages((current) => [...current, result.message]);
         setActiveRun(result.run);
+        setDelegation(result.delegation);
       }
       setAgents((current) =>
-        current.map((agent) =>
-          agent.id === selected.id ? { ...agent, status: "busy" } : agent,
-        ),
+        current.map((agent) => (agent.id === selected.id ? { ...agent, status: "busy" } : agent)),
       );
       await pollRun(result.run.id, selected.id);
     } catch (reason) {
@@ -245,65 +307,21 @@ export default function App() {
     }
   };
 
-  const unlock = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    setAuthToken(authInput);
-    try {
-      await bootstrap();
-      setAuthRequired(false);
-      setAuthInput("");
-    } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 401) {
-        setError("The access token is not valid.");
-      } else {
-        setError(reason instanceof Error ? reason.message : String(reason));
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (authRequired === null) {
+  if (booting) {
     return (
       <main className="auth-screen">
         <section className="auth-card" aria-live="polite">
           <div className="brand-mark">A</div>
           <span className="eyebrow">Agent Launchpad</span>
           <h1>Connecting to the control plane</h1>
-          {error ? <div className="error-banner" role="alert">{error}</div> : <Spinner />}
+          <Spinner />
         </section>
       </main>
     );
   }
 
-  if (authRequired) {
-    return (
-      <main className="auth-screen">
-        <form className="auth-card" onSubmit={unlock}>
-          <div className="brand-mark">A</div>
-          <span className="eyebrow">Agent Launchpad</span>
-          <h1>Enter the access token</h1>
-          <p>This shared demo token is configured by the platform operator.</p>
-          {error && <div className="error-banner" role="alert">{error}</div>}
-          <label>
-            Access token
-            <input
-              autoFocus
-              type="password"
-              value={authInput}
-              onChange={(event) => setAuthInput(event.target.value)}
-              autoComplete="current-password"
-              required
-            />
-          </label>
-          <button className="button button-primary" disabled={busy || !authInput.trim()}>
-            {busy ? <Spinner /> : "Open Launchpad"}
-          </button>
-        </form>
-      </main>
-    );
+  if (!session) {
+    return <LoginScreen onSubmit={(u, p) => void signIn(u, p)} busy={busy} error={error} />;
   }
 
   return (
@@ -319,6 +337,17 @@ export default function App() {
                 : "ECS / Docker · Codex CLI"}
             </span>
           </div>
+        </div>
+
+        <div className="session-card">
+          <div>
+            <span className="eyebrow">Signed in</span>
+            <strong>{session.username}</strong>
+            <span className="session-role">{session.role}</span>
+          </div>
+          <button className="button button-ghost" onClick={() => void signOut()}>
+            Sign out
+          </button>
         </div>
 
         <button
@@ -358,6 +387,18 @@ export default function App() {
           )}
         </nav>
 
+        <div className="documents-card">
+          <span className="eyebrow">Your protected documents</span>
+          {documents.map((document) => (
+            <div className="document-row" key={document.id}>
+              <code>{document.id}</code>
+              <span>{document.title}</span>
+              {document.updatedBy && <em>last written by {document.updatedBy.slice(0, 12)}…</em>}
+            </div>
+          ))}
+          {documents.length === 0 && <span className="empty-row">None.</span>}
+        </div>
+
         <div className="runtime-card">
           <span className="eyebrow">Runtime</span>
           <strong>{system?.runtime ?? "Checking…"}</strong>
@@ -365,6 +406,12 @@ export default function App() {
             {system?.arkModel ?? "Ark model not configured"}
             {system?.containerEngine ? " · " + system.containerEngine : ""}
           </span>
+          {system?.identity && (
+            <span>
+              action token TTL {system.identity.actionTokenTtlSeconds}s
+              {system.identity.tokenSecretPinned ? "" : " · ephemeral signing key"}
+            </span>
+          )}
         </div>
       </aside>
 
@@ -392,6 +439,25 @@ export default function App() {
           </div>
         )}
 
+        {system?.identity?.runtimeMayNotReachHost && (
+          <div className="config-banner">
+            <span>!</span>
+            <div>
+              <strong>The Agent Runtime may not be able to reach the resource API</strong>
+              <p>
+                Runs execute in containers, but the platform is bound to loopback. Docker
+                Desktop usually bridges this; Colima, Podman and Linux do not. If a
+                delegated call fails to connect, restart with <code>HOST=0.0.0.0</code> —
+                the control plane now requires a real session — or use{" "}
+                <code>RUNTIME_PROVIDER=local-process</code>. The Runtime is being told to
+                call <code>{system.identity.resourceApiForRuntime}</code>.
+              </p>
+            </div>
+          </div>
+        )}
+
+        <ApprovalInbox onError={reportError} />
+
         {selected ? (
           <>
             <header className="agent-header">
@@ -410,11 +476,7 @@ export default function App() {
                 >
                   Settings
                 </button>
-                <button
-                  className="button button-ghost"
-                  onClick={toggleAgent}
-                  disabled={busy}
-                >
+                <button className="button button-ghost" onClick={toggleAgent} disabled={busy}>
                   {selected.status === "stopped" ? "Start" : "Stop"}
                 </button>
                 <button
@@ -427,6 +489,22 @@ export default function App() {
               </div>
             </header>
 
+            <nav className="tab-bar">
+              {(["playground", "identity", "audit"] as Tab[]).map((item) => (
+                <button
+                  key={item}
+                  className={"tab " + (tab === item ? "selected" : "")}
+                  onClick={() => setTab(item)}
+                >
+                  {item === "playground"
+                    ? "Playground"
+                    : item === "identity"
+                      ? "Identity & delegation"
+                      : "Authorization trail"}
+                </button>
+              ))}
+            </nav>
+
             {showSettings && (
               <form className="settings-panel" onSubmit={saveAgent}>
                 <div className="settings-title">
@@ -434,7 +512,9 @@ export default function App() {
                     <span className="eyebrow">Agent configuration</span>
                     <h2>Instructions and identity</h2>
                   </div>
-                  <button type="button" onClick={() => setShowSettings(false)}>×</button>
+                  <button type="button" onClick={() => setShowSettings(false)}>
+                    ×
+                  </button>
                 </div>
                 <div className="form-grid">
                   <label>
@@ -450,9 +530,7 @@ export default function App() {
                     Description
                     <input
                       value={form.description}
-                      onChange={(event) =>
-                        setForm({ ...form, description: event.target.value })
-                      }
+                      onChange={(event) => setForm({ ...form, description: event.target.value })}
                       maxLength={500}
                     />
                   </label>
@@ -461,9 +539,7 @@ export default function App() {
                   System instructions
                   <textarea
                     value={form.instructions}
-                    onChange={(event) =>
-                      setForm({ ...form, instructions: event.target.value })
-                    }
+                    onChange={(event) => setForm({ ...form, instructions: event.target.value })}
                     rows={5}
                     maxLength={10_000}
                   />
@@ -477,111 +553,138 @@ export default function App() {
               </form>
             )}
 
-            <section className="playground">
-              <div className="playground-topbar">
-                <div>
-                  <span className="eyebrow">Playground</span>
-                  <h2>Build something with your Agent</h2>
-                </div>
-                <div className="session-info">
-                  <span className="pulse" />
-                  {selected.codexThreadId ? "Session connected" : "New session"}
-                </div>
-              </div>
+            {tab === "identity" && <IdentityPanel agent={selected} onError={reportError} />}
+            {tab === "audit" && <AuditPanel agentId={selected.id} onError={reportError} />}
 
-              <div className="messages">
-                {messages.length === 0 && !activeRun ? (
-                  <div className="welcome">
-                    <div className="welcome-orbit">
-                      <div>⌁</div>
-                    </div>
-                    <h3>What should {selected.name} build?</h3>
-                    <p>
-                      The Agent can inspect files, write code, run commands, and continue the
-                      same Codex session across messages.
-                    </p>
-                    <div className="prompt-grid">
-                      {starterPrompts.map((item) => (
-                        <button key={item} onClick={() => setPrompt(item)}>
-                          <span>↗</span>
-                          {item}
-                        </button>
-                      ))}
-                    </div>
+            {tab === "playground" && (
+              <section className="playground">
+                <div className="playground-topbar">
+                  <div>
+                    <span className="eyebrow">Playground</span>
+                    <h2>Build something with your Agent</h2>
                   </div>
-                ) : (
-                  messages.map((message) => (
-                    <article className={"message message-" + message.role} key={message.id}>
-                      <div className="message-meta">
-                        <strong>{message.role === "user" ? "You" : selected.name}</strong>
-                        <span>{formatTime(message.createdAt)}</span>
-                      </div>
-                      <div className="message-body">{message.content}</div>
-                    </article>
-                  ))
-                )}
-                {activeRun && ["queued", "running"].includes(activeRun.status) && (
-                  <article className="message message-assistant thinking">
-                    <div className="message-meta">
-                      <strong>{selected.name}</strong>
-                      <span>working in the Agent workspace</span>
-                    </div>
-                    <div className="thinking-row">
-                      <Spinner />
-                      Codex is reading, editing, or running commands…
-                    </div>
-                  </article>
-                )}
-                {activeRun?.status === "failed" && (
-                  <article className="run-error">
-                    <strong>Run failed</strong>
-                    <span>{activeRun.error}</span>
-                  </article>
-                )}
-                <div ref={messageEnd} />
-              </div>
+                  <div className="session-info">
+                    <span className="pulse" />
+                    {selected.codexThreadId ? "Session connected" : "New session"}
+                  </div>
+                </div>
 
-              <form className="composer" onSubmit={sendMessage}>
-                <textarea
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      event.currentTarget.form?.requestSubmit();
+                {delegation && (
+                  <div className={"delegation-banner " + (delegation.granted ? "ok" : "warn")}>
+                    {delegation.granted ? (
+                      <span>
+                        This turn carries action token{" "}
+                        <code>{delegation.tokenId?.slice(0, 8)}</code> with{" "}
+                        {delegation.scopes.map((scope) => (
+                          <code key={scope}>{scope}</code>
+                        ))}{" "}
+                        until {delegation.expiresAt && formatTime(delegation.expiresAt)}. It is
+                        bound to this Run and revocable at any moment.
+                      </span>
+                    ) : (
+                      <span>
+                        This turn carries no delegated authority. The Agent can work in its
+                        workspace but cannot reach any protected resource.
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                <div className="messages">
+                  {messages.length === 0 && !activeRun ? (
+                    <div className="welcome">
+                      <div className="welcome-orbit">
+                        <div>⌁</div>
+                      </div>
+                      <h3>What should {selected.name} build?</h3>
+                      <p>
+                        The Agent can inspect files, write code, run commands, and reach the
+                        protected resources you have delegated to it — and nothing else.
+                      </p>
+                      <div className="prompt-grid">
+                        {starterPrompts.map((item) => (
+                          <button key={item} onClick={() => setPrompt(item)}>
+                            <span>↗</span>
+                            {item}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    messages.map((message) => (
+                      <article className={"message message-" + message.role} key={message.id}>
+                        <div className="message-meta">
+                          <strong>{message.role === "user" ? "You" : selected.name}</strong>
+                          <span>{formatTime(message.createdAt)}</span>
+                        </div>
+                        <div className="message-body">{message.content}</div>
+                      </article>
+                    ))
+                  )}
+                  {activeRun && ["queued", "running"].includes(activeRun.status) && (
+                    <article className="message message-assistant thinking">
+                      <div className="message-meta">
+                        <strong>{selected.name}</strong>
+                        <span>working in the Agent workspace</span>
+                      </div>
+                      <div className="thinking-row">
+                        <Spinner />
+                        Codex is reading, editing, or running commands…
+                      </div>
+                    </article>
+                  )}
+                  {activeRun?.status === "failed" && (
+                    <article className="run-error">
+                      <strong>Run failed</strong>
+                      <span>{activeRun.error}</span>
+                    </article>
+                  )}
+                  <div ref={messageEnd} />
+                </div>
+
+                <form className="composer" onSubmit={sendMessage}>
+                  <textarea
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        event.currentTarget.form?.requestSubmit();
+                      }
+                    }}
+                    placeholder={
+                      selected.status === "stopped"
+                        ? "Start this Agent to continue…"
+                        : "Describe what you want the Agent to do…"
                     }
-                  }}
-                  placeholder={
-                    selected.status === "stopped"
-                      ? "Start this Agent to continue…"
-                      : "Describe what you want the Agent to do…"
-                  }
-                  disabled={
-                    selected.status === "stopped" ||
-                    selected.status === "busy" ||
-                    activeRun != null && ["queued", "running"].includes(activeRun.status)
-                  }
-                  rows={3}
-                />
-                <div className="composer-footer">
-                  <span>
-                    Enter to send · Shift + Enter for newline · {system?.codexSandboxMode ?? "checking sandbox"}
-                  </span>
-                  <button
-                    className="send-button"
                     disabled={
-                      !prompt.trim() ||
                       selected.status === "stopped" ||
                       selected.status === "busy" ||
                       (activeRun != null && ["queued", "running"].includes(activeRun.status))
                     }
-                    aria-label="Send message"
-                  >
-                    ↑
-                  </button>
-                </div>
-              </form>
-            </section>
+                    rows={3}
+                  />
+                  <div className="composer-footer">
+                    <span>
+                      Enter to send · Shift + Enter for newline ·{" "}
+                      {system?.codexSandboxMode ?? "checking sandbox"}
+                    </span>
+                    <button
+                      className="send-button"
+                      disabled={
+                        !prompt.trim() ||
+                        selected.status === "stopped" ||
+                        selected.status === "busy" ||
+                        (activeRun != null && ["queued", "running"].includes(activeRun.status))
+                      }
+                      aria-label="Send message"
+                    >
+                      ↑
+                    </button>
+                  </div>
+                </form>
+              </section>
+            )}
           </>
         ) : (
           <div className="no-agent">
@@ -613,9 +716,14 @@ export default function App() {
               <div>
                 <span className="eyebrow">New workspace</span>
                 <h2>Create an Agent</h2>
-                <p>Each Agent gets a persistent folder and a resumable Codex session.</p>
+                <p>
+                  The Agent gets a persistent folder, a resumable Codex session, its own
+                  principal, and a read-only delegation you can widen later.
+                </p>
               </div>
-              <button type="button" onClick={() => setShowCreate(false)}>×</button>
+              <button type="button" onClick={() => setShowCreate(false)}>
+                ×
+              </button>
             </div>
             <label>
               Name
@@ -633,9 +741,7 @@ export default function App() {
               <input
                 placeholder="Builds polished React prototypes"
                 value={form.description}
-                onChange={(event) =>
-                  setForm({ ...form, description: event.target.value })
-                }
+                onChange={(event) => setForm({ ...form, description: event.target.value })}
                 maxLength={500}
               />
             </label>
@@ -643,9 +749,7 @@ export default function App() {
               Instructions
               <textarea
                 value={form.instructions}
-                onChange={(event) =>
-                  setForm({ ...form, instructions: event.target.value })
-                }
+                onChange={(event) => setForm({ ...form, instructions: event.target.value })}
                 rows={6}
                 maxLength={10_000}
               />
