@@ -76,8 +76,8 @@ not. Three ways to handle it:
 
 | Situation | What to do |
 | --- | --- |
-| Container profile, any engine | `HOST=0.0.0.0` as above. Safe now that the control plane requires a session. |
-| You have `codex` installed on the host | `RUNTIME_PROVIDER=local-process npm run poc` - no container, no host networking |
+| Container profile (`npm run poc`), any engine | `HOST=0.0.0.0` as above — `npm run poc` always runs the container profile; it does not read a `RUNTIME_PROVIDER` override |
+| You have `codex` installed on the host and want no container at all | `npm run build && RUNTIME_PROVIDER=local-process ARK_API_KEY=... ARK_MODEL=... npm start` — bypasses `scripts/start-local-poc.sh` directly |
 | No engine, no key, just want the evidence | `npm run smoke:identity` |
 
 The platform refuses to bind beyond loopback while the demo accounts still
